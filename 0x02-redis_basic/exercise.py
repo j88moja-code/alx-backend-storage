@@ -1,58 +1,86 @@
 #!/usr/bin/env python3
 """ Module for Redis db """
 import redis
-from uuid import uuid4
-from typing import Union, Callable, Optional
-from sys import byteorder
+import uuid
+from typing import Union, Optional, Callable, Any
 from functools import wraps
 
 
 def count_calls(method: Callable) -> Callable:
-    """ Counts number of calls to a class method """
-    # use qualname dunder for qualified class method name
-    key = method.__qualname__
-    # use functools.wraps to create wrapper method for incrementing
-
+    """ Count how many times a method is called
+    """
     @wraps(method)
-    def wrapper(self, *args, **kwargs):
-        """ Wrapper for method """
-        self._redis.incr(key)
-        return method(self, *args, **kwargs)
-
+    def wrapper(self, *args) -> bytes:
+        """ Wrapper function for decorator
+        """
+        key = method.__qualname__
+        self._redis.incr(key, 1)
+        return method(self, *args)
     return wrapper
 
 
-class Cache:
-    """ Class for methods that operate a caching system """
+def call_history(method: Callable) -> Callable:
+    """ History of input and output
+    """
+    @wraps(method)
+    def wrapper(self, *args) -> bytes:
+        """ Wrapper function for decorator
+        """
+        output = method(self, *args)
+        self._redis.rpush("{}:inputs".format(method.__qualname__), str(args))
+        self._redis.rpush("{}:outputs".format(
+            method.__qualname__), output)
+        return output
+    return wrapper
 
+
+def replay(method: Callable):
+    """ replay input and output
+    """
+    cache = method.__self__
+    inputs = cache._redis.lrange(
+        "{}:inputs".format(cache.store.__qualname__), 0, -1)
+    outputs = cache._redis.lrange(
+        "{}:outputs".format(cache.store.__qualname__), 0, -1)
+    print("{} was called {} times:".format(method.__qualname__, len(inputs)))
+    zipped = zip(inputs, outputs)
+    for in_list in zipped:
+        print("Cache.store(*{}) -> {}".format(
+            in_list[0].decode(), in_list[1].decode()))
+
+
+class Cache:
+    """ Cache class
+    """
     def __init__(self):
-        """ Instance of Redis db """
+        """ Init Cache method
+        """
         self._redis = redis.Redis()
         self._redis.flushdb()
 
     @count_calls
+    @call_history
     def store(self, data: Union[str, bytes, int, float]) -> str:
-        """ Creates key and stores it with data """
-        # uuid must be type cast to str for Redis to be able to accept it
-        key = str(uuid4())
-        # use pipelining for multi sets, mset() is not approrpiate for a cache
-        self._redis.set(key, data)
-        return key
+        """ Store data in Cache
+        """
+        UUID = str(uuid.uuid4())
+        self._redis.set(UUID, data)
+        return UUID
 
-    def get(self, key: str, fn: Optional[Callable] = None)\
-            -> Union[str, bytes, int, float]:
-        """ Returns data converted to desired format """
-        # default Redis.get in case key does not exist
-        data = self._redis.get(key)
-        # use callable if one provided
-        if fn:
-            data = fn(data)
-        return data
+    def get(self, key: str, fn: Optional[Callable] = None) -> Any:
+        """ Get key's right format
+        """
+        if fn is not None:
+            return fn(self._redis.get(key))
+        else:
+            return self._redis.get(key)
 
-    def get_str(self, data: bytes) -> str:
-        """ Convert bytes to str """
-        return data.decode('utf-8')
+    def get_str(self, k: str) -> str:
+        """ convert bytes to str
+        """
+        return self.get(k, str)
 
-    def get_int(self, data: bytes) -> int:
-        """ Convert bytes to int """
-        return int.from_bytes(data, byteorder)
+    def get_int(self, k: int) -> int:
+        """ convert bytes to int
+        """
+        return self.get(k, int)
